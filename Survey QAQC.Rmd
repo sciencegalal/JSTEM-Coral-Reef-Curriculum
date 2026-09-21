@@ -1,0 +1,140 @@
+---
+title: "Survey QAQC"
+output: html_notebook
+---
+
+# clean the data
+```{r}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+
+survey1 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey QAQC.xlsx", 
+                      sheet = "Survey 1", col_types = "text")
+survey1 <- survey1 %>% mutate(Survey = 1)
+#survey1 <- survey1[-c(1, 2), ]
+#survey1 <- survey1 %>%
+#  select(19:58)
+view(survey1)
+summary(survey1)
+
+survey2 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey QAQC.xlsx", 
+                      sheet = "Survey 2", col_types = "text")
+survey2 <- survey2 %>% mutate(Survey = 2)
+view(survey2)
+
+survey3 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey QAQC.xlsx", 
+                      sheet = "Survey 3", col_types = "text")
+survey3 <- survey3 %>% mutate(Survey = 3)
+view(survey3)
+
+survey4 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey QAQC.xlsx", 
+                      sheet = "Survey 4", col_types = "text")
+survey4 <- survey4 %>% mutate(Survey = 4)
+view(survey4)
+
+
+# Combine the datasets into one
+all_surveys <- bind_rows(survey1, survey2, survey3, survey4)
+view(all_surveys)
+summary(all_surveys)
+all_surveys$ID <- as.factor(all_surveys$ID)
+all_surveys$Duration <- as.numeric(all_surveys$Duration)
+summary(all_surveys)
+```
+
+# Count participants 
+```{r}
+master_list <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey_stats_QAQCed.xlsx", sheet = "Master Data", col_types = "text")
+summary(master_list)
+master_list$`Student ID` <- as.factor(master_list$`Student ID`)
+# Count unique student IDs
+unique_ids <- master_list %>%
+  summarise(num_unique_ids = n_distinct(`Student ID`))
+# Print the result
+print(unique_ids) # 126 responses 
+
+# clean 1 removed NA responses or students that only took 1/4 surveys
+clean_1 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey_stats_QAQCed.xlsx", sheet = "2-4 surveys", col_types = "text")
+summary(clean_1)
+clean_1$`Student ID` <- as.factor(clean_1$`Student ID`)
+# Count unique student IDs
+unique_ids <- clean_1 %>%
+  summarise(num_unique_ids = n_distinct(`Student ID`))
+# Print the result
+print(unique_ids) # 117 responses 
+
+# clean 2 removed students who only answered 2 surveys and left only students that answered 3-4 surveys
+clean_2 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey_stats_QAQCed.xlsx", sheet = "3 or 4 surveys", col_types = "text")
+summary(clean_2)
+clean_2$`Student ID` <- as.factor(clean_2$`Student ID`)
+# Count unique student IDs
+unique_ids <- clean_2 %>%
+  summarise(num_unique_ids = n_distinct(`Student ID`))
+# Print the result
+print(unique_ids) # 108 responses 
+
+# clean 3 removed any responses found during QAQC for short duration or uniform/sequential responses
+clean_3 <- read_excel("/Users/alexgood/Desktop/Education Chapter/Survey_stats_QAQCed.xlsx", sheet = "outliers removed", col_types = "text")
+summary(clean_3)
+clean_3$`Student ID` <- as.factor(clean_3$`Student ID`)
+# Count unique student IDs
+unique_ids <- clean_3 %>%
+  summarise(num_unique_ids = n_distinct(`Student ID`))
+# Print the result
+print(unique_ids) # 100 responses 
+```
+
+# Check for short duration 
+```{r}
+# Filter out rows where Duration is less than 90
+all_surveys <- all_surveys %>%
+  filter(Duration >= 90)
+
+all_surveys <- all_surveys %>%
+  filter(Duration > 90)
+
+# View the cleaned data to confirm
+View(all_surveys)
+
+# View the filtered rows
+View(filtered_duration)
+
+# 19 responses 
+```
+
+# Uniform and Sequential responses
+```{r}
+#all_surveys <- all_surveys %>%
+#  drop_na()
+
+all_surveys %>%
+  select(all_of(question_cols)) %>%
+  summarise_all(~ sum(!is.numeric(.))) # Counts non-numeric values
+          
+
+# Calculate the standard deviation of responses for each participant per survey
+uniform_responses <- all_surveys %>%
+  rowwise() %>%
+  mutate(sd_responses = sd(c_across(-c(ID, Duration, Survey)), na.rm = TRUE)) %>% # Exclude ID, Duration, and Survey
+  filter(sd_responses == 0) # Keep only rows where the standard deviation is zero
+
+# View uniform responses
+uniform_responses
+# remove 6 students 
+
+# Ensure all response columns are numeric
+all_surveys <- all_surveys %>%
+  mutate(across(-c(ID, Duration, Survey), as.numeric))
+
+# Identify sequential responses for each participant
+sequential_responses <- all_surveys %>%
+  rowwise() %>%
+  mutate(is_sequential = all(diff(c_across(-c(ID, Duration, Survey)), na.rm = TRUE) == 1 |  # Check ascending sequence
+                             diff(c_across(-c(ID, Duration, Survey)), na.rm = TRUE) == -1)) %>%  # Check descending sequence
+  filter(is_sequential == TRUE) # Filter only sequential responses
+
+# View sequential responses
+sequential_responses # NONE 
+```
+

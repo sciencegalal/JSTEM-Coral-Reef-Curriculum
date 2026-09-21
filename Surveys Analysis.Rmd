@@ -1,0 +1,1002 @@
+---
+title: "Education Surveys"
+output: html_notebook
+---
+
+# Data
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ez)
+library(writexl)
+library(ggplot2)
+library(emmeans)
+library(car)
+library(WRS2)
+library(lme4)
+library(patchwork)
+library(viridis)
+library(cowplot)
+library(ggpubr)
+library(gt)
+
+# Load the data (replace 'survey_data.csv' with your actual file path)
+data <- read.csv('/Users/alexgood/Desktop/Education Chapter/Survey_stats_new.csv')
+View(data)
+
+# Count unique student IDs
+unique_ids <- data %>%
+  summarise(num_unique_ids = n_distinct(`ID`))
+# Print the result
+print(unique_ids) # 100 responses 
+
+table(unique(data[c("ID", "Gender")])$Gender)
+
+# Convert relevant columns to appropriate data types
+data$Survey <- as.factor(data$Survey)
+data$ID <- as.factor(data$ID)
+data$Teacher <- as.factor(data$Teacher)
+data$Grade <- as.factor(data$Grade)
+data$ID <- as.factor(data$ID)
+data$Course <- as.factor(data$Course)
+data$Period <- as.factor(data$Period)
+data$Environment <- as.numeric(data$Environment)
+data$Corals <- as.numeric(data$Corals)
+data$Last <- as.factor(data$Last)
+data$First <- as.factor(data$First)
+data$Gender <- as.factor(data$Gender)
+
+summary(data)
+
+# Reshape the data into long format (if not already in long format)
+long_data <- data %>%
+  pivot_longer(
+    cols = c(Attitude, Career, Environment, Corals, Total),
+    names_to = "Category",
+    values_to = "Score"
+  )
+
+long_data$ID <- as.factor(long_data$ID)
+long_data$Teacher <- as.factor(long_data$Teacher)
+long_data$Grade <- as.factor(long_data$Grade)
+long_data$Course <- as.factor(long_data$Course)
+long_data$Period <- as.factor(long_data$Period)
+long_data$Category <- as.factor(long_data$Category)
+long_data$Last <- as.factor(long_data$Last)
+long_data$First <- as.factor(long_data$First)
+long_data$Gender <- as.factor(long_data$Gender)
+View(long_data)
+
+summary(long_data)
+write_xlsx(long_data, "long_data.xlsx")
+summary(long_data)
+
+# Filter data for a specific category (e.g., Total)
+total_data <- long_data %>% filter(Category == "Total")
+View(total_data)
+#write_xlsx(long_data, "survey long data stats.xlsx")
+
+# Filter data for a specific category (e.g., Attitude)
+att_data <- long_data %>% filter(Category == "Attitude")
+View(att_data)
+summary(att_data)
+#write_xlsx(long_data, "survey long data stats.xlsx")
+
+# Filter data for a specific category (e.g., Career)
+career_data <- long_data %>% filter(Category == "Career")
+View(career_data)
+#write_xlsx(long_data, "survey long data stats.xlsx")
+
+# Filter data for a specific category (e.g., Environment)
+env_data <- long_data %>% filter(Category == "Environment")
+View(env_data)
+#write_xlsx(long_data, "survey long data stats.xlsx")
+
+# Filter data for a specific category (e.g., Corals)
+coral_data <- long_data %>% filter(Category == "Corals")
+View(coral_data)
+summary(coral_data)
+#write_xlsx(long_data, "survey long data stats.xlsx")
+
+# standardize scores
+# Create a lookup table for max scores
+max_scores_lookup <- data.frame(
+  Category = c("Total", "Attitude", "Career", "Environment", "Corals"),
+  MaxPoints = c(140, 40, 25, 40, 35)
+)
+
+# Add the max points to the dataset
+long_data <- long_data %>%
+  left_join(max_scores_lookup, by = "Category")
+
+long_data <- long_data %>%
+  mutate(StandardizedScore = (Score / MaxPoints) * 100)
+
+head(long_data)
+View(long_data)
+```
+
+# Check Assumptions
+Category	Normality	Homogeneity	Recommended Test
+Attitude	p > 0.05	p > 0.05	Repeated Measures ANOVA
+Career	p > 0.05	p > 0.05	Repeated Measures ANOVA
+Corals	p ≤ 0.05	p ≤ 0.05	Friedman Test (or Robust ANOVA if data permits)
+Environment	p ≤ 0.05	p ≤ 0.05	Friedman Test (or Robust ANOVA if data permits)
+Total	p ≤ 0.05	p ≤ 0.05	Friedman Test (or Robust ANOVA if data permits)
+Friedmans test - needs balanced block design (not every student did every)
+```{r}
+# Check for missing values
+sum(is.na(long_data))
+
+# Check if the dataset is balanced
+table(long_data$ID, long_data$Survey, long_data$Category)
+
+# Perform Shapiro-Wilk test for each Survey and Category
+normality_results <- long_data %>%
+  group_by(Survey, Category) %>%
+  summarise(p_value = shapiro.test(Score)$p.value)
+
+print(normality_results)
+
+# Initialize an empty data frame to store results
+homogeneity_results <- data.frame(Category = character(), p_value = numeric(), stringsAsFactors = FALSE)
+
+# Loop through each unique category
+for (cat in unique(long_data$Category)) {
+  # Subset the data for the current category
+  category_data <- subset(long_data, Category == cat)
+  
+  # Run Levene's test
+  levene_result <- leveneTest(Score ~ as.factor(Survey), data = category_data)
+  
+  # Extract p-value and store the result
+  homogeneity_results <- rbind(homogeneity_results, 
+                                data.frame(Category = cat, 
+                                           p_value = levene_result$`Pr(>F)`[1]))
+}
+
+# Print the results
+print(homogeneity_results)
+
+# Example for one category (e.g., "Attitude")
+attitude_data <- subset(long_data, Category == "Attitude")
+leveneTest(Score ~ as.factor(Survey), data = attitude_data)
+
+# Inspect variance
+variance_check <- long_data %>%
+  group_by(Survey, Category) %>%
+  summarise(variance = var(Score, na.rm = TRUE))
+
+print(variance_check)
+```
+
+# Total Score of Surveys
+Using mixed effects model instead for unbalanced design and within and between variability 
+```{r}
+### Repeated Measures ANOVA
+# Analyze each category separately
+category_results <- list()
+
+for (cat in unique(long_data$Category)) {
+  # Filter data for the current category
+  category_data <- subset(long_data, Category == cat)
+  
+  # Fit the repeated measures ANOVA
+  category_results[[cat]] <- aov(Score ~ Survey + Error(ID / Survey), data = category_data)
+  
+  # Print results for the category
+  cat("Results for Category:", cat, "\n")
+  print(summary(category_results[[cat]]))
+}
+
+# Example for one category (e.g., "Attitude")
+# total_data <- subset(long_data, Category == "Total")
+
+# Fit a linear model
+lm_total <- lm(Score ~ Survey, data = total_data)
+
+# Perform pairwise comparisons for Survey levels
+posthoc_total <- emmeans(lm_total, pairwise ~ Survey)
+
+# Print pairwise comparison results
+summary(posthoc_total)
+# significant differences from survey 1 and 4 and 2 and 4 
+
+### LME models
+# Fit a linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey + (1 | ID), data = total_data)
+summary(lmer_model)
+
+# Post-hoc pairwise comparisons with emmeans
+posthoc <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc) # significant differences between 1-4, 2-4, 3-4, 1-3
+
+# Fit the linear mixed-effects model
+#lmer_model <- lmer(Score ~ Survey + Teacher + Period + Gender + Grade + (1 | ID), data = total_data)
+lmer_model <- lmer(Score ~ Survey * Gender + Gender + Survey + Teacher + Period + Grade + (1 | ID), data = total_data)
+
+# Model summary
+summary(lmer_model)
+
+# Test fixed effects
+anova(lmer_model)
+
+# Pairwise comparisons for Teacher
+posthoc_teacher <- emmeans(lmer_model, pairwise ~ Teacher)
+summary(posthoc_teacher) # not significant
+
+# Pairwise comparisons for Course
+posthoc_course <- emmeans(lmer_model, pairwise ~ Period)
+summary(posthoc_course) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_gender <- emmeans(lmer_model, pairwise ~ Survey * Gender)
+summary(posthoc_gender) # 1-4 and 2-4 Men and 1-4, 2-4 and 3-4 Femaile
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Grade)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Gender)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc_grade) # 1-3, 1-4, 204 significant
+
+# Plot Survey and Gender interaction effects
+plot(emmeans(lmer_model, ~ Survey * Gender))
+
+# Create a bar plot with error bars
+total_summary <- total_data %>%
+  group_by(Survey) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n())
+  )
+
+total <- ggplot(total_summary, aes(x = Survey, y = mean_score)) +
+  geom_bar(stat = "identity", fill = "#2C5C9B", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_score - se_score, ymax = mean_score + se_score), 
+                width = 0.2, size = 1.5, color = "black") +
+  labs(
+       x = "Survey", 
+       y = "Mean Total Score") +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+    geom_hline(yintercept = 140, linetype = "dashed", color = "gray", size = 1) +
+  ylim(0, 140) +
+  theme_minimal(base_size = 24)
+total
+save_plot("total.tiff", total, base_height = 12, base_width = 12)
+
+# Summarize data by Survey and Gender
+total_summary <- total_data %>%
+  group_by(Survey, Gender) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Plot interaction
+custom_colors <- viridis(3, option = "magma")
+
+total_gender <- ggplot(total_summary, aes(x = Survey, y = mean_score, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+  geom_errorbar(
+    aes(ymin = mean_score - se_score, ymax = mean_score + se_score),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    color = "black"
+  ) +
+  scale_fill_manual(values = c("F" = "#F2B6F9", "M" = "#51B2BA")) +
+  labs(
+    x = "Survey",
+    y = "Mean Total Score",
+    fill = "Gender"
+  ) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  theme_minimal(base_size = 24) +
+  geom_hline(yintercept = 140, linetype = "dashed", color = "gray", size = 1) +
+  ylim(0, 140)
+total_gender
+save_plot("total_gender.tiff", total_gender, base_height = 12, base_width = 14)
+
+total.graphs <- total+total_gender
+total.graphs
+save_plot("total_graphs.tiff", total.graphs, base_height = 10, base_width = 28)
+```
+
+# Attitude 
+```{r}
+# Example for one category (e.g., "Attitude")
+#attitude_data <- subset(long_data, Category == "Attitude")
+
+# Fit a linear model
+lm_attitude <- lm(Score ~ Survey, data = attitude_data)
+
+# Perform pairwise comparisons for Survey levels
+posthoc_attitude <- emmeans(lm_attitude, pairwise ~ Survey)
+
+# Print pairwise comparison results
+summary(posthoc_attitude) # survey 2-4 significant
+
+### LME models
+# Fit a linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey + (1 | ID), data = att_data)
+summary(lmer_model)
+
+# Post-hoc pairwise comparisons with emmeans
+posthoc <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc) # significant differences between 1-4, 2-4
+
+# Fit the linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey * Gender + Survey + Gender + Teacher + Period + Grade + (1 | ID), data = att_data)
+
+# Model summary
+summary(lmer_model)
+
+# Test fixed effects
+anova(lmer_model)
+
+# Pairwise comparisons for Teacher
+posthoc_teacher <- emmeans(lmer_model, pairwise ~ Teacher)
+summary(posthoc_teacher) # not significant
+
+# Pairwise comparisons for Course
+posthoc_course <- emmeans(lmer_model, pairwise ~ Period)
+summary(posthoc_course) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_gender <- emmeans(lmer_model, pairwise ~ Survey * Gender)
+summary(posthoc_gender) # survey 2-4 for men and 1-4 for women 
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Grade)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Gender)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc_grade) # 1-4, 2-4 significant
+
+# Plot Survey and Gender interaction effects
+plot(emmeans(lmer_model, ~ Survey * Gender))
+
+# Summarize mean and standard error for each survey
+attitude_summary <- att_data %>%
+  group_by(Survey) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n())
+  )
+
+# Create a bar plot with error bars
+att_total <- ggplot(attitude_summary, aes(x = Survey, y = mean_score)) +
+  geom_bar(stat = "identity", fill = "#2C5C9B", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_score - se_score, ymax = mean_score + se_score), 
+                width = 0.2, size = 1.5, color = "black") +
+  labs(
+       x = "Survey", 
+       y = "Mean Attitude Score") +
+  geom_hline(yintercept = 40, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  ylim(0,40) +
+  theme_minimal(base_size = 24)
+att_total
+save_plot("att_total.tiff", att_total, base_height = 12, base_width = 12)
+
+# Summarize data by Survey and Gender
+att_summary <- att_data %>%
+  group_by(Survey, Gender) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Plot interaction
+att_graph <- ggplot(att_summary, aes(x = Survey, y = mean_score, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+  geom_errorbar(
+    aes(ymin = mean_score - se_score, ymax = mean_score + se_score),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    color = "black"
+  ) +
+  scale_fill_viridis(discrete = TRUE) + 
+  scale_fill_manual(values = c("F" = "#F2B6F9", "M" = "#51B2BA")) +
+  labs(
+    x = "Survey",
+    y = "Mean Attitude Score",
+    fill = "Gender"
+  ) +
+  geom_hline(yintercept = 40, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  theme_minimal(base_size = 24) +
+  ylim(0, 40)
+att_graph
+save_plot("att_graph.tiff", att_graph, base_height = 12, base_width = 14)
+```
+# Career 
+```{r}
+# Fit a linear model
+lm_career <- lm(Score ~ Survey, data = career_data)
+
+# Perform pairwise comparisons for Survey levels
+posthoc_career <- emmeans(lm_career, pairwise ~ Survey)
+
+# Print pairwise comparison results
+summary(posthoc_career) # 1-4 and 2-4 significant 
+
+### LME models
+# Fit a linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey + (1 | ID), data = career_data)
+summary(lmer_model)
+
+# Post-hoc pairwise comparisons with emmeans
+posthoc <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc) # significant differences between 1-4, 2-4, and 3-4
+
+# Fit the linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey * Gender + Survey + Gender + Teacher + Period + Grade + (1 | ID), data = career_data)
+
+# Model summary
+summary(lmer_model)
+
+# Test fixed effects
+anova(lmer_model)
+
+# Pairwise comparisons for Teacher
+posthoc_teacher <- emmeans(lmer_model, pairwise ~ Teacher)
+summary(posthoc_teacher) # not significant
+
+# Pairwise comparisons for Course
+posthoc_course <- emmeans(lmer_model, pairwise ~ Period)
+summary(posthoc_course) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_gender <- emmeans(lmer_model, pairwise ~ Survey * Gender)
+summary(posthoc_gender) # 1-4 for women 
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Grade)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Gender)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc_grade) # 1-4, 2-4 and 3-4 significant
+
+# Summarize mean and standard error for each survey
+career_summary <- career_data %>%
+  group_by(Survey) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n())
+  )
+
+# Create a bar plot with error bars
+career_total <- ggplot(career_summary, aes(x = Survey, y = mean_score)) +
+  geom_bar(stat = "identity", fill = "#2C5C9B", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_score - se_score, ymax = mean_score + se_score), 
+                width = 0.2, size = 1.5, color = "black") +
+  labs(
+       x = "Survey", 
+       y = "Mean Career Score") +
+  geom_hline(yintercept = 25, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  ylim(0,25) +
+  theme_minimal(base_size = 24)
+career_total
+save_plot("career_total.tiff", career_total, base_height = 12, base_width = 12)
+
+# Plot Survey and Gender interaction effects
+plot(emmeans(lmer_model, ~ Survey * Gender))
+
+# Summarize data by Survey and Gender
+career_summary <- career_data %>%
+  group_by(Survey, Gender) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Plot interaction
+career_graph <- ggplot(career_summary, aes(x = Survey, y = mean_score, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+  geom_errorbar(
+    aes(ymin = mean_score - se_score, ymax = mean_score + se_score),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    color = "black"
+  ) +
+  scale_fill_viridis(discrete = TRUE) + 
+  scale_fill_manual(values = c("F" = "#F2B6F9", "M" = "#51B2BA")) +
+  labs(
+    x = "Survey",
+    y = "Mean Career Score",
+    fill = "Gender"
+  ) +
+  geom_hline(yintercept = 25, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  theme_minimal(base_size = 24) +
+  ylim(0, 25)
+career_graph
+save_plot("career_graph.tiff", career_graph, base_height = 12, base_width = 14)
+```
+
+# Environment 
+```{r}
+# Fit a linear model
+lm_env <- lm(Score ~ Survey, data = env_data)
+
+# Perform pairwise comparisons for Survey levels
+posthoc_env <- emmeans(lm_env, pairwise ~ Survey)
+
+# Print pairwise comparison results
+summary(posthoc_env) # no significance
+
+### LME models
+# Fit a linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey + (1 | ID), data = env_data)
+summary(lmer_model)
+
+# Post-hoc pairwise comparisons with emmeans
+posthoc <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc) # significant differences between 1-4, 2-4
+
+# Fit the linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey * Gender + Survey + Gender + Teacher + Period + Grade + (1 | ID), data = env_data)
+
+# Model summary
+summary(lmer_model)
+
+# Test fixed effects
+anova(lmer_model)
+
+# Pairwise comparisons for Teacher
+posthoc_teacher <- emmeans(lmer_model, pairwise ~ Teacher)
+summary(posthoc_teacher) # not significant
+
+# Pairwise comparisons for Course
+posthoc_course <- emmeans(lmer_model, pairwise ~ Period)
+summary(posthoc_course) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_gender <- emmeans(lmer_model, pairwise ~ Survey * Gender)
+summary(posthoc_gender) # 1-4 for women 
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Grade)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Gender)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc_grade) # 1-4, 2-4 significant
+
+# Summarize mean and standard error for each survey
+env_summary <- env_data %>%
+  group_by(Survey) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n())
+  )
+
+# Create a bar plot with error bars
+env_total <- ggplot(env_summary, aes(x = Survey, y = mean_score)) +
+  geom_bar(stat = "identity", fill = "#2C5C9B", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_score - se_score, ymax = mean_score + se_score), 
+                width = 0.2, size = 1.5, color = "black") +
+  labs(
+       x = "Survey", 
+       y = "Mean Environment Score") +
+  geom_hline(yintercept = 40, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  ylim(0,40) +
+  theme_minimal(base_size = 24)
+env_total
+save_plot("env_total.tiff", env_total, base_height = 12, base_width = 12)
+
+# Plot Survey and Gender interaction effects
+plot(emmeans(lmer_model, ~ Survey * Gender))
+
+# Summarize data by Survey and Gender
+env_summary <- env_data %>%
+  group_by(Survey, Gender) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Plot interaction
+env_graph <- ggplot(env_summary, aes(x = Survey, y = mean_score, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+  geom_errorbar(
+    aes(ymin = mean_score - se_score, ymax = mean_score + se_score),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    color = "black"
+  ) +
+  scale_fill_viridis(discrete = TRUE) + 
+  scale_fill_manual(values = c("F" = "#F2B6F9", "M" = "#51B2BA")) +
+  labs(
+    x = "Survey",
+    y = "Mean Environment Score",
+    fill = "Gender"
+  ) +
+  geom_hline(yintercept = 40, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  theme_minimal(base_size = 24) +
+  ylim(0, 40)
+env_graph
+save_plot("env_graph.tiff", env_graph, base_height = 12, base_width = 14)
+```
+# Corals 
+```{r}
+# Fit a linear model
+lm_coral <- lm(Score ~ Survey, data = coral_data)
+
+# Perform pairwise comparisons for Survey levels
+posthoc_coral <- emmeans(lm_coral, pairwise ~ Survey)
+
+# Print pairwise comparison results
+summary(posthoc_coral) # 1-3, 1-4, 2-4
+
+### LME models
+# Fit a linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey + (1 | ID), data = coral_data)
+summary(lmer_model)
+
+# Post-hoc pairwise comparisons with emmeans
+posthoc <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc) # significant differences between 1-3, 1-4, 2-4
+
+# Fit the linear mixed-effects model
+lmer_model <- lmer(Score ~ Survey * Gender + Survey + Gender + Teacher + Period + Grade + (1 | ID), data = coral_data)
+
+# Model summary
+summary(lmer_model)
+
+# Test fixed effects
+anova(lmer_model)
+
+# Pairwise comparisons for Teacher
+posthoc_teacher <- emmeans(lmer_model, pairwise ~ Teacher)
+summary(posthoc_teacher) # not significant
+
+# Pairwise comparisons for Course
+posthoc_course <- emmeans(lmer_model, pairwise ~ Period)
+summary(posthoc_course) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_gender <- emmeans(lmer_model, pairwise ~ Survey * Gender)
+summary(posthoc_gender) # 1-3 and 1-4 and 2-3 and 2-4 for women and 1-4 for men
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Grade)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Gender)
+summary(posthoc_grade) # not significant
+
+# Post-hoc comparisons for other predictors (e.g., Gender)
+posthoc_grade <- emmeans(lmer_model, pairwise ~ Survey)
+summary(posthoc_grade) # 1-3, 1-4, 2-4 significant
+
+# Summarize mean and standard error for each survey
+coral_summary <- coral_data %>%
+  group_by(Survey) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n())
+  )
+
+# Create a bar plot with error bars
+coral_total <- ggplot(coral_summary, aes(x = Survey, y = mean_score)) +
+  geom_bar(stat = "identity", fill = "#2C5C9B", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_score - se_score, ymax = mean_score + se_score), 
+                width = 0.2, size = 1.5, color = "black") +
+  labs(
+       x = "Survey", 
+       y = "Mean Coral Score") +
+  geom_hline(yintercept = 35, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  ylim(0,35) +
+  theme_minimal(base_size = 24)
+coral_total
+save_plot("coral_total.tiff", coral_total, base_height = 12, base_width = 12)
+
+# Plot Survey and Gender interaction effects
+plot(emmeans(lmer_model, ~ Survey * Gender))
+
+# Summarize data by Survey and Gender
+coral_summary <- coral_data %>%
+  group_by(Survey, Gender) %>%
+  summarize(
+    mean_score = mean(Score, na.rm = TRUE),
+    se_score = sd(Score, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Plot interaction
+coral_graph <- ggplot(coral_summary, aes(x = Survey, y = mean_score, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+  geom_errorbar(
+    aes(ymin = mean_score - se_score, ymax = mean_score + se_score),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    color = "black"
+  ) +
+  scale_fill_viridis(discrete = TRUE) + 
+  scale_fill_manual(values = c("F" = "#F2B6F9", "M" = "#51B2BA")) +
+  labs(
+    x = "Survey",
+    y = "Mean Coral Score",
+    fill = "Gender"
+  ) +
+  geom_hline(yintercept = 35, linetype = "dashed", color = "gray", size = 1) +
+  scale_x_discrete(labels = c("1" = "Control", "2" = "Traditional Curriculum", "3" = "Hybrid Learning", "4" = "Field Trip")) +
+  theme_minimal(base_size = 24) +
+  ylim(0, 35)
+coral_graph
+save_plot("coral_graph.tiff", coral_graph, base_height = 12, base_width = 14)
+```
+
+# Gender 
+```{r}
+# final plot 
+att_career <- att_total+att_graph+career_total+career_graph
+plot_layout(ncol = 2, byrow = TRUE)
+att_career
+save_plot("att_career.tiff", att_career, base_height = 18, base_width = 26)
+
+env_coral <- env_total+env_graph+coral_total+coral_graph
+plot_layout(ncol = 2, byrow = TRUE)
+env_coral
+save_plot("env_coral.tiff", env_coral, base_height = 18, base_width = 26)
+
+# Aggregate data for plotting
+aggregated_data <- total_data %>%
+  group_by(Survey, Gender) %>%
+  summarise(MeanResponse = mean(Score), .groups = "drop")
+
+# Create the bar graph
+ggplot(aggregated_data, aes(x = factor(Survey), y = MeanResponse, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Survey Responses by Survey Number and Gender",
+    x = "Survey Number",
+    y = "Mean Response",
+    fill = "Gender"
+  ) +
+  theme_minimal()
+
+# Aggregate data for plotting
+aggregated_data <- att_data %>%
+  group_by(Survey, Gender) %>%
+  summarise(MeanResponse = mean(Score), .groups = "drop")
+
+# Create the bar graph
+ggplot(aggregated_data, aes(x = factor(Survey), y = MeanResponse, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Survey Responses by Survey Number and Gender",
+    x = "Survey Number",
+    y = "Mean Response",
+    fill = "Gender"
+  ) +
+  theme_minimal()
+
+# Aggregate data for plotting
+aggregated_data <- career_data %>%
+  group_by(Survey, Gender) %>%
+  summarise(MeanResponse = mean(Score), .groups = "drop")
+
+# Create the bar graph
+ggplot(aggregated_data, aes(x = factor(Survey), y = MeanResponse, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Survey Responses by Survey Number and Gender",
+    x = "Survey Number",
+    y = "Mean Response",
+    fill = "Gender"
+  ) +
+  theme_minimal()
+
+# Aggregate data for plotting
+aggregated_data <- env_data %>%
+  group_by(Survey, Gender) %>%
+  summarise(MeanResponse = mean(Score), .groups = "drop")
+
+# Create the bar graph
+ggplot(aggregated_data, aes(x = factor(Survey), y = MeanResponse, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Survey Responses by Survey Number and Gender",
+    x = "Survey Number",
+    y = "Mean Response",
+    fill = "Gender"
+  ) +
+  theme_minimal()
+
+# Aggregate data for plotting
+aggregated_data <- coral_data %>%
+  group_by(Survey, Gender) %>%
+  summarise(MeanResponse = mean(Score), .groups = "drop")
+print(aggregated_data)
+#na_rows <- coral_data[is.na(coral_data$Score), ]
+#print(na_rows)
+
+# Create the bar graph
+ggplot(aggregated_data, aes(x = factor(Survey), y = MeanResponse, fill = Gender)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Survey Responses by Survey Number and Gender",
+    x = "Survey Number",
+    y = "Mean Response",
+    fill = "Gender"
+  ) +
+  theme_minimal()
+```
+
+# Interactions
+```{r}
+# Linear mixed-effects model with random effect for ID
+model <- lmer(StandardizedScore ~ Gender * Survey * Category + (1 | ID), data = long_data)
+model2 <- lmer(StandardizedScore ~ Survey * Category + (1 | ID), data = long_data)
+
+# OR a simpler linear model if no random effects are needed
+# model <- lm(Score ~ Gender * Survey * Category, data = total_data)
+
+# Compute EMMs
+em_results <- emmeans(model, ~ Gender * Survey | Category)
+em_results2 <- emmeans(model2, ~ Survey | Category)
+
+# Print the results
+print(em_results)
+print(em_results2)
+
+# Pairwise comparisons for Gender and Survey within each Category
+pairwise_results <- emmeans(model, pairwise ~ Gender * Survey | Category)
+pairwise_results2 <- emmeans(model2, pairwise ~ Survey | Category)
+
+# Print pairwise results
+print(pairwise_results)
+print(pairwise_results2)
+
+# Summary of the model
+summary(model)
+anova(model)
+summary(model2)
+anova(model2)
+
+# # Compute estimated marginal means for the interaction
+# em_interaction <- emmeans(model, ~ Gender * Survey)
+# 
+# # View the results
+# print(em_interaction)
+# 
+# # Perform pairwise comparisons for interaction terms
+# pairwise_results <- emmeans(model, pairwise ~ Gender * Survey)
+# print(pairwise_results)
+
+# Compute EMMs for Gender and Survey by Category
+em_results <- emmeans(model, ~ Gender * Survey | Category)
+em_results2 <- emmeans(model2, ~ Survey | Category)
+
+# Convert the EMMs to a data frame
+em_results_df <- as.data.frame(em_results)
+em_results_df2 <- as.data.frame(em_results2)
+
+# Round numeric values for clarity
+em_results_df <- em_results_df %>%
+  mutate(
+    EMM = round(emmean, 2),          # Estimated Marginal Mean
+    SE = round(SE, 2),               # Standard Error
+    `Lower CL` = round(lower.CL, 2), # Lower Confidence Limit
+    `Upper CL` = round(upper.CL, 2)  # Upper Confidence Limit
+  ) %>%
+  select(Category, Gender, Survey, EMM, SE, `Lower CL`, `Upper CL`) # Select desired columns
+
+em_results_df2 <- em_results_df2 %>%
+  mutate(
+    EMM = round(emmean, 2),          # Estimated Marginal Mean
+    SE = round(SE, 2),               # Standard Error
+    `Lower CL` = round(lower.CL, 2), # Lower Confidence Limit
+    `Upper CL` = round(upper.CL, 2)  # Upper Confidence Limit
+  ) %>%
+  select(Category, Survey, EMM, SE, `Lower CL`, `Upper CL`) # Select desired column
+
+# Create a formatted table
+em_table <- em_results_df %>%
+  gt() %>%
+  tab_header(
+    title = "Estimated Marginal Means by Gender and Survey for Each Category",
+    subtitle = "Results from Linear Mixed-Effects Model"
+  ) %>%
+  cols_label(
+    Category = "Category",
+    Gender = "Gender",
+    Survey = "Survey",
+    EMM = "Estimated Marginal Mean",
+    SE = "Standard Error",
+    `Lower CL` = "Lower CI",
+    `Upper CL` = "Upper CI"
+  ) %>%
+  fmt_number(columns = c(EMM, SE, `Lower CL`, `Upper CL`), decimals = 2)
+
+em_table2 <- em_results_df2 %>%
+  gt() %>%
+  tab_header(
+    title = "Estimated Marginal Means by Survey for Each Category",
+    subtitle = "Results from Linear Mixed-Effects Model"
+  ) %>%
+  cols_label(
+    Category = "Category",
+    Survey = "Survey",
+    EMM = "Estimated Marginal Mean",
+    SE = "Standard Error",
+    `Lower CL` = "Lower CI",
+    `Upper CL` = "Upper CI"
+  ) %>%
+  fmt_number(columns = c(EMM, SE, `Lower CL`, `Upper CL`), decimals = 2)
+
+# View the table
+em_table
+em_table2
+```
+
+# Calculate differences
+for all students pooled and both genders corals were the greatest increase in score and environment was the lowest increase in score 
+```{r}
+# Calculate the mean score difference by Category
+all_students_diff <- long_data %>%
+  filter(Survey %in% c("1", "4")) %>%  # Filter only Survey 1 and 4
+  group_by(Category, Survey) %>%
+  summarize(mean_score = mean(StandardizedScore, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Survey, values_from = mean_score, names_prefix = "Survey_") %>%
+  mutate(diff = Survey_4 - Survey_1)  # Calculate difference
+
+# Find the categories with the largest and smallest differences
+max_increase <- all_students_diff %>% filter(diff == max(diff))
+min_increase <- all_students_diff %>% filter(diff == min(diff))
+
+# View results
+print(all_students_diff)
+print(max_increase)
+print(min_increase)
+
+# Calculate the mean score difference by Category and Gender
+gender_diff <- long_data %>%
+  filter(Survey %in% c("1", "4")) %>%
+  group_by(Category, Gender, Survey) %>%
+  summarize(mean_score = mean(StandardizedScore, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Survey, values_from = mean_score, names_prefix = "Survey_") %>%
+  mutate(diff = Survey_4 - Survey_1)  # Calculate difference
+
+# Find the largest and smallest differences by Gender
+max_increase_gender <- gender_diff %>% filter(diff == max(diff))
+min_increase_gender <- gender_diff %>% filter(diff == min(diff))
+
+# View results
+print(gender_diff)
+print(max_increase_gender)
+print(min_increase_gender)
+```
+
